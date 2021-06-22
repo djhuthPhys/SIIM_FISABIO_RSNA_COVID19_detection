@@ -14,6 +14,119 @@ from torch.nn import functional as F
 from d2l import torch as d2l
 
 
+class base_layer(nn.Module):
+    """
+    Defines the basic residual layer of the base SSD network
+    """
+    def __init__(self, in_channels, out_channels, *args, **kwargs):
+        """
+
+        :param in_channels: number of input channels
+        :param out_channels: number of output channels
+        :param args:
+        :param kwargs:
+        :return:
+        """
+        super(base_layer, self).__init__()
+        self.in_channels, self.out_channels = in_channels, out_channels
+
+        self.conv = nn.Sequential(OrderedDict(
+            {
+                'conv1': nn.Conv2d(in_channels, out_channels, kernel_size=(3,3), padding=(1,1), *args, **kwargs),
+
+                'norm': nn.BatchNorm2d(out_channels),
+
+                'relu': nn.ReLU(),
+
+                'conv2': nn.Conv2d(out_channels, out_channels, kernel_size=(3,3), padding=(1,1), *args, **kwargs)
+            }
+        ))
+
+        self.norm = nn.BatchNorm2d(out_channels)
+
+        self.relu = nn.ReLU()
+
+        self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=(1,1), *args, **kwargs)
+
+    def forward(self, x):
+        residual = x
+        if self.apply_mapping:
+            residual = self.residual(x)
+        x = self.conv(x)
+        x += residual
+        x = self.relu(self.norm(x))
+        return x
+
+    @property
+    def apply_mapping(self):
+        return self.in_channels != self.out_channels
+
+
+class base_block(nn.Module):
+    """
+    Defines the basic block of the base SSD network
+    """
+    def __init__(self, in_channels, out_channels, layer=base_layer, block_depth=1, *args, **kwargs):
+        """
+
+        :param in_channels: number of in channels (only used by first convolution layer in block)
+        :param out_channels: number of out channels (used by the rest of the layers)
+        :param layer: defines the layer to use when building the block
+        :param block_depth: defines the number of layers the block is built with
+        :param args:
+        :param kwargs:
+        """
+        super(base_block, self).__init__()
+
+        self.block = nn.Sequential(
+            layer(in_channels, out_channels, *args, **kwargs),
+            *[layer(out_channels, out_channels, *args, **kwargs)
+              for _ in range(block_depth-1)]
+        )
+
+    def forward(self, x):
+        for layer in self.block:
+            x = layer(x)
+        return x
+
+
+class base_network(nn.Module):
+    """
+    Defines the base network for the SSD model
+    """
+    def __init__(self, block_channels, block_depths, block=base_block, *args, **kwargs):
+        """
+
+        :param block_channels: tuple of number of channels used in each block
+        :param block_depths: tuple of the number of layers used in each block
+        :param block: defines which block to use for the network
+        :param args:
+        :param kwargs:
+        """
+        super(base_network, self).__init__()
+
+        self.block_channels, self.block_depths, self.block = block_channels, block_depths, block
+
+        self.pooling = nn.MaxPool2d(2)
+
+        self.in_out_pairs = list(zip(block_channels, block_channels[1:]))
+
+        self.blocks = nn.ModuleList([
+            block(block_channels[0], block_channels[0], block_depth=block_depths[0], *args, **kwargs),
+            *[block(in_channels, out_channels, block_depth=block_depth, *args, **kwargs)
+              for (in_channels, out_channels), block_depth in zip(self.in_out_pairs, block_depths[1:])]
+        ])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+            x = self.pooling(x)
+        return x
+
+
+def base_model(block_channels, block_depths):
+    return base_network(block_channels, block_depths)
+
 # Class prediction layer
 def class_predictor(num_inputs, num_anchors, num_classes):
     return nn.Conv2d(num_inputs, num_anchors * (num_classes + 1), kernel_size=(3,3), padding=(1,1))

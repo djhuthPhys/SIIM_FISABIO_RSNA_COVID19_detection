@@ -5,8 +5,6 @@ Author: Dawson Huth
 06-17-2021
 """
 
-import torch
-
 from torch import nn
 from collections import OrderedDict
 from d2l import torch as d2l

@@ -296,76 +296,64 @@ def generate_anchors(data_list, scales, ratios):
     :param ratios: list of aspect ratios to use in each tensor output
     :return: anchors: list of anchor boxes, each element corresponds to each output of network
     """
-    anchors = []
-    num_classes = 4
+    anchors = [d2l.multibox_prior(data_list[0], sizes=scales, ratios=ratios)]
+    # Reshape to (features height, features width, # anchors centered on same pixel, 4)
+    height = data_list[0].size()[2]
+    width = data_list[0].size()[3]
     num_anchors = len(scales) + len(ratios) - 1
+    anchors = [anchors[0].reshape(height, width, num_anchors, 4)]
 
-    anchors.append(d2l.multibox_prior(data_list[0], sizes=scales, ratios=ratios)) # Base network anchors
     for i in range(len(data_list[1])):
-        anchors.append(d2l.multibox_prior(data_list[1][i], sizes=scales, ratios=ratios))
+        anchors_tmp = d2l.multibox_prior(data_list[1][i], sizes=scales, ratios=ratios)
+        # Reshape
+        height = data_list[1][i].size()[2]
+        width = data_list[1][i].size()[3]
+        anchors_tmp.reshape(height, width, num_anchors, 4)
+
+        anchors.append(anchors_tmp)
 
     return anchors
 
-# Full forward pass of the SSD network
-def SSD_forward(base, scale_depths, X):
+
+# Full network
+class full_SSD(nn.Module):
     """
-    The full forward pass through the SSD network. Outputs class confidence scores and bbox predictions
-    :param base: The base model
-    :param X: Input data to model
-    :return: conf_scores, bbox_preds
+    Combines the base model, scaling model, anchor generation, and detection heads into a single model that can be
+    trained
     """
-    # Anchor box variables
-    scales = [0.75, 0.66, 0.5, 0.33, 0.25, 0.1]
-    ratios = [1, 2, 0.5, 0.25]
-    num_classes = 4
-    num_anchors = len(scales) + len(ratios) - 1
+    def __init__(self, base_channels, base_depths, scale_channels, scale_depths, scales, ratios, num_classes):
+        """
 
+        :param base_channels: tuple of number of channels output in each block of the base model
+        :param base_depths: tuple of the number of layers used in each block of the base model
+        :param scale_channels: tuple of number of channels output in each block of the scaling model
+        :param scale_depths: tuple of the number of layers used in each block of the scaling model
+        :param scales: list of scales to use in each tensor output, scale of output sizes normalized to 1
+        :param ratios: list of aspect ratios to use in each tensor output
+        """
+        super(full_SSD, self).__init__()
+        self.num_classes = num_classes
+        self.num_anchors = len(scales) + len(ratios) - 1
+        self.scales, self.ratios = scales, ratios
 
-    # Pass through base model and generate anchor boxes
-    base_output = base(X)
-    ####################### Generate anchor boxes
-    image_height = base_output.size()[2]
-    image_width = base_output.size()[3]
-    bbox_scale = torch.tensor((image_width, image_height, image_width, image_height))
-    base_anchors = d2l.multibox_prior(base_output, sizes=scales, ratios=ratios)
-    scaled_anchors = base_anchors * bbox_scale
-    #######################
-    base_classes, base_bboxes = detection_head(base_output.size()[1], num_anchors, num_classes)(base_output)
+        self.features = ssd_convs(base_channels, base_depths, scale_channels, scale_depths)
 
-    print(base_output.size())
-    print(base_anchors.size())
-    print(scaled_anchors.size())
-    print(base_classes.size())
-    print(base_bboxes.size())
+        self.output_channels = (base_channels[-1],) + scale_channels
 
-    # Pass outputs from base model through scaled feature extraction
+        self.detectors = nn.ModuleList([detection_head(self.output_channels[i], self.num_anchors, self.num_classes)
+                                        for i in range(len(self.output_channels))])
 
+    def forward(self, x):
+        # Pass through base model and generate anchor boxes
+        x = self.features(x)
+        anchors = generate_anchors(x, self.scales, self.ratios)
 
-    return None
+        # Loop through detector heads to get class and bbox predictions
+        base_classes, base_bboxes = detection_head(x[0].size()[1], self.num_anchors, self.num_classes)(x[0])
+        conf_scores, bbox_preds = [base_classes], [base_bboxes]
+        for i in range(len(x[1])):
+            classes_tmp, bboxes_tmp = detection_head(x[1][i].size()[1], self.num_anchors, self.num_classes)(x[1][i])
+            conf_scores.append(classes_tmp)
+            bbox_preds.append(bboxes_tmp)
 
-
-
-########################################################################################################################
-# Class prediction layer
-def class_predictor(num_inputs, num_anchors, num_classes):
-    return nn.Conv2d(num_inputs, num_anchors * (num_classes + 1), kernel_size=(3,3), padding=(1,1))
-
-# Bounding Box prediction layer
-def bbox_predictor(num_inputs, num_anchors):
-    return nn.Conv2d(num_inputs, num_anchors * 4, kernel_size=(3,3), padding=(1,1))
-
-# Flatten predictions for concatenation
-def flatten_preds(pred):
-    return torch.flatten(pred.permute(0,2,3,1), start_dim=1)
-
-# Concatenate predictions for loss calculation
-def concatenate_preds(preds):
-    return torch.cat([flatten_preds(p) for p in preds], dim=1)
-
-# Forward prop function for blocks
-def blk_forward(X, blk, size, ratio, class_predictor, bbox_predictor):
-    Y = blk(X)
-    anchors = d2l.multibox_prior(Y, sizes=size, ratios=ratio)
-    class_preds = class_predictor(Y)
-    bbox_preds = bbox_predictor(Y)
-    return (Y, anchors, class_preds, bbox_preds)
+        return conf_scores, bbox_preds, anchors

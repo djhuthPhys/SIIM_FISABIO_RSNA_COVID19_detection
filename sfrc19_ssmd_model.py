@@ -127,7 +127,7 @@ def base_model(block_channels, block_depths):
     return base_network(block_channels, block_depths)
 
 
-# Scaled feature extraction
+# Scaled feature extraction network
 class scaling_layer(nn.Module):
     """
     Defines the layer for extracting features at a new scale from the base network output
@@ -180,13 +180,84 @@ class scaling_block(nn.Module):
               for _ in range(block_depth-1)]
         )
 
-        self.pooling = nn.MaxPool2d(2)
 
     def forward(self, x):
         for layer in self.block:
             x = layer(x)
-            x = self.pooling(x)
         return x
+
+
+class scaling_network(nn.Module):
+    """
+    Defines the network responsible for the scaled feature mapping
+    """
+    def __init__(self, block_channels, block_depths, block=scaling_block, *args, **kwargs):
+        """
+
+        :param block_channels: tuple of number of channels used in each block
+        :param block_depths: tuple of the number of layers used in each block
+        :param block: defines which block to use for the network
+        :param args:
+        :param kwargs:
+        """
+        super(scaling_network, self).__init__()
+
+        self.block_channels, self.block_depths, self.block = block_channels, block_depths, block
+
+        self.pooling = nn.MaxPool2d(2)
+
+        self.in_out_pairs = list(zip(block_channels, block_channels[1:]))
+
+        self.blocks = nn.ModuleList([
+            *[block(in_channels, out_channels, block_depth=block_depth, *args, **kwargs)
+              for (in_channels, out_channels), block_depth in zip(self.in_out_pairs, block_depths[1:])]
+        ])
+
+    def forward(self, x):
+        block_outputs = []
+        for block in self.blocks:
+            x = block(x)
+            x = self.pooling(x)
+            block_outputs.append(x)
+        return block_outputs
+
+
+def scaling_model(block_channels, block_depths):
+    return scaling_network(block_channels, block_depths)
+
+
+# Base and scaling combined
+class ssd_convs(nn.Module):
+    """
+    Combines the base and scaling models into a single model and returns the base output and scaling outputs as a list
+    of torch tensors in order of their evaluation.
+    """
+    def __init__(self, base_channels, base_depths, scale_channels, scale_depths):
+        """
+
+        :param base_channels: tuple of number of channels output in each block of the base model
+        :param base_depths: tuple of the number of layers used in each block of the base model
+        :param scale_channels: tuple of number of channels output in each block of the scaling model
+        :param scale_depths: tuple of the number of layers used in each block of the scaling model
+        """
+        super(ssd_convs, self).__init__()
+
+        self.base_channels, self.base_depths = base_channels, base_depths
+
+        self.scale_depths = (1,) + scale_depths
+
+        self.scale_channels = (base_channels[-1],) + scale_channels
+
+        assert base_channels[-1] == self.scale_channels[0]
+
+        self.base_network = base_network(self.base_channels, self.base_depths)
+
+        self.scaling_network = scaling_network(self.scale_channels, self.scale_depths)
+
+    def forward(self, x):
+        base_out = self.base_network(x)
+        scale_out = self.scaling_network(base_out)
+        return [base_out, scale_out]
 
 
 # Detection head
@@ -214,6 +285,26 @@ class detection_head(nn.Module):
         bboxes = self.bbox_predictor(x)
         return classes, bboxes
 
+
+# Generate anchors
+def generate_anchors(data_list, scales, ratios):
+    """
+    Uses the SSD network output to generate anchor boxes for object detection
+    :param data_list: list of output tensors from SSD network, base output is element 0; scaled output is list in
+                      element 1
+    :param scales: list of scales to use in each tensor output, scale of output sizes normalized to 1
+    :param ratios: list of aspect ratios to use in each tensor output
+    :return: anchors: list of anchor boxes, each element corresponds to each output of network
+    """
+    anchors = []
+    num_classes = 4
+    num_anchors = len(scales) + len(ratios) - 1
+
+    anchors.append(d2l.multibox_prior(data_list[0], sizes=scales, ratios=ratios)) # Base network anchors
+    for i in range(len(data_list[1])):
+        anchors.append(d2l.multibox_prior(data_list[1][i], sizes=scales, ratios=ratios))
+
+    return anchors
 
 # Full forward pass of the SSD network
 def SSD_forward(base, scale_depths, X):

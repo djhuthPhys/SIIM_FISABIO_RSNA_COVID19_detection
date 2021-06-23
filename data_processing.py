@@ -8,6 +8,8 @@ import pandas as pd
 
 from skimage.transform import resize
 from tqdm import tqdm
+
+
 def load_labels(path):
     """
     Loads the train_image_level.csv and train_study_labels.csv files into a pandas dataframe. Data is then processed
@@ -30,7 +32,8 @@ def load_labels(path):
     # Process image level label data into pytorch tensor format for training
     # bbox_labels are in format (# images, maximum # boxes, # coordinates [xmin, ymin, xmax, ymax])
     bbox_labels = torch.zeros(image_data.shape[0], max_boxes, image_data.shape[1])
-    for image in range(len(image_data.label)):
+    print('Loading bounding boxes')
+    for image in tqdm(range(len(image_data.label))):
         labels_list = [float(label) for label in image_data.label[image].split() if label.replace('.', '').isnumeric()]
         for box in range(len(labels_list)//5):
             x_min = labels_list[5 * box + 1]
@@ -41,8 +44,9 @@ def load_labels(path):
             bbox_labels[image, box, :] = bbox_coords
 
     # Process study level label data into pytorch tensor format for training
+    print('Processing study labels')
     study_labels = torch.zeros(study_data.shape[0],study_data.shape[1] - 1)
-    for study in range(len(study_data.id)):
+    for study in tqdm(range(len(study_data.id))):
         study_labels[study, 0] = study_data['Negative for Pneumonia'][study]
         study_labels[study, 1] = study_data['Typical Appearance'][study]
         study_labels[study, 2] = study_data['Indeterminate Appearance'][study]
@@ -103,21 +107,20 @@ def downsample_images(path, size=512):
     return None
 
 
-def load_images(path):
+def load_images(path, example_ids):
     """
     Loads in the .dcm images
     :param path: Path to image files
+    :param example_ids: The IDs associated with the loaded example data
     :return: image_tensor: Pytorch tensor with image level data in the same order as loaded labels
     """
 
-    _, _, example_ids = load_labels('./data')
-
     # Get image parameters
     num_images = len(example_ids)
-    test_image = np.load(glob.glob(path + '/' + example_ids['StudyInstanceUID'][0] + '/*/*')[0])
+    test_image = np.load(glob.glob(path + '/rescaled_train/' + example_ids['StudyInstanceUID'][0] + '/*/*')[0])
     image_size = np.shape(test_image)[0]
     image_tensor = torch.zeros((num_images, 1, image_size, image_size))
-    print('There are ' + str(num_images) + ' images in this data set of size '
+    print('\nThere are ' + str(num_images) + ' images in this data set of size '
           + str(image_size) + 'X' + str(image_size) + ' pixels')
 
     it = 0
@@ -125,45 +128,45 @@ def load_images(path):
 
         study_id = example_ids['StudyInstanceUID'][image_num]
         image_id = example_ids['id'][image_num]
-
-        image_path = glob.glob(path + '/' + study_id + '/*/' + image_id + '.npy')
+        image_path = glob.glob(path + '/rescaled_train/' + study_id + '/*/' + image_id + '.npy')
         image = torch.from_numpy(np.load(image_path[0]))
         image = torch.reshape(image, (1, 1, image_size, image_size))
         image_tensor[image_num,:,:,:] = image
         it += 1
 
-    print('\nYou\'ve loaded ' + str(it) + ' images of size '
-          + str(image_tensor.size()[2]) + 'X' + str(image_tensor.size()[3]) + ' pixels')
+    print(str(it) + ' images of size '
+          + str(image_tensor.size()[2]) + 'X' + str(image_tensor.size()[3]) + ' pixels loaded')
 
     return image_tensor
 
 
-def load_scaling(path):
+def load_scaling(path, example_ids):
     """
     Loads the scaling information of the images from when they were resized with downsample_images function. The first
     column are y scaling factors and the second are x scaling factors.
     :param path: Path to scaling files
+    :param example_ids: The IDs associated with the loaded example data
     :return:
     """
-    _, _, example_ids = load_labels('./data')
 
     num_images = len(example_ids)
     scaling_tensor = torch.zeros((num_images, 2))
-    print('There are ' + str(num_images) + ' scaling files in this data set')
+    print('\nThere are ' + str(num_images) + ' scaling files in this data set')
 
     it = 0
     for image_num in tqdm(range(len(example_ids))):
 
         study_id = example_ids['StudyInstanceUID'][image_num]
         image_id = example_ids['id'][image_num]
-        scale_path = glob.glob(path + '/' + study_id + '/*/' + image_id + '_scale.npy')
+        scale_path = glob.glob(path + '/rescaled_train/' + study_id + '/*/' + image_id + '_scale.npy')
         scales = torch.from_numpy(np.load(scale_path[0]))
         scaling_tensor[image_num,:] = scales
         it += 1
 
-    print('\nYou\'ve loaded ' + str(it) + ' scaling values.')
+    print(str(it) + ' scaling values loaded')
 
     return scaling_tensor
+
 
 def get_class_weights(study_labels):
     """
@@ -177,3 +180,20 @@ def get_class_weights(study_labels):
     class_weights = torch.max(cumulative_labels)/cumulative_labels
 
     return class_weights
+
+
+def load_sfrc_data(path):
+    """
+    Loads all label, image, and scaling data in consistent order. Data loaded from here is ready for training with SSD
+    model
+    :param: path: path to data files
+    :return: images, class_labels, bboxes
+    """
+
+    bboxes, class_labels, example_ids = load_labels(path)
+
+    scales = load_scaling(path, example_ids)
+
+    images = load_images(path, example_ids)
+
+    return images, class_labels, bboxes, scales

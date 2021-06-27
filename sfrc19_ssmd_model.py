@@ -4,6 +4,7 @@ A Single-shot Multibox Detection model for the SIIM FISABIO RSNA COVID 19 detect
 Author: Dawson Huth
 06-17-2021
 """
+import torch
 
 from torch import nn
 from collections import OrderedDict
@@ -299,15 +300,22 @@ def generate_anchors(data_list, scales, ratios):
     height = data_list[0].size()[2]
     width = data_list[0].size()[3]
     num_anchors = len(scales) + len(ratios) - 1
+
     anchors = [anchors[0].reshape(height, width, num_anchors, 4)]
+    anchors[0][:, :, :, 2:4] = anchors[0][:, :, :, 2:4] - anchors[0][:, :, :, 0:2]  # Change to height and width format
+    anchors[0] = torch.transpose(anchors[0], 0, 2)  # Get in shape (# anchors per pixel, 4, image_size, image_size)
+    anchors[0] = torch.transpose(anchors[0], 1, 3)
+
 
     for i in range(len(data_list[1])):
         anchors_tmp = d2l.multibox_prior(data_list[1][i], sizes=scales, ratios=ratios)
         # Reshape
         height = data_list[1][i].size()[2]
         width = data_list[1][i].size()[3]
-        anchors_tmp.reshape(height, width, num_anchors, 4)
-
+        anchors_tmp = anchors_tmp.reshape(height, width, num_anchors, 4)
+        anchors_tmp[:, :, :, 2:4] = anchors_tmp[:, :, :, 2:4] - anchors_tmp[:, :, :, 0:2]  # Change to height and width format
+        anchors_tmp = torch.transpose(anchors_tmp, 0, 2) # Get in shape (# anchors per pixel, 4, image_size, image_size)
+        anchors_tmp = torch.transpose(anchors_tmp, 1, 3)
         anchors.append(anchors_tmp)
 
     return anchors

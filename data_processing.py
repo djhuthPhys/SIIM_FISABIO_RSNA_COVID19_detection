@@ -31,16 +31,20 @@ def load_labels(path):
 
     # Process image level label data into pytorch tensor format for training
     # bbox_labels are in format (# images, maximum # boxes, # coordinates [xmin, ymin, xmax, ymax])
-    bbox_labels = torch.zeros(image_data.shape[0], max_boxes, image_data.shape[1])
+    bbox_labels = torch.zeros(image_data.shape[0], max_boxes, image_data.shape[1]+1)
     print('Loading bounding boxes')
     for image in tqdm(range(len(image_data.label))):
         labels_list = [float(label) for label in image_data.label[image].split() if label.replace('.', '').isnumeric()]
         for box in range(len(labels_list)//5):
+            if 'none' in image_data.label[image].split():
+                opacity = 0.0
+            else:
+                opacity = 1.0
             x_min = labels_list[5 * box + 1]
             y_min = labels_list[5 * box + 2]
             x_max = labels_list[5 * box + 3]
             y_max = labels_list[5 * box + 4]
-            bbox_coords = torch.tensor([x_min, y_min, x_max, y_max])
+            bbox_coords = torch.tensor([opacity, x_min, y_min, x_max, y_max])
             bbox_labels[image, box, :] = bbox_coords
 
     # Process study level label data into pytorch tensor format for training
@@ -60,6 +64,7 @@ def downsample_images(path, size=512):
     Processes all images into a size x size array for training. X and Y scale factors from resizing are saved in
     IMAGE_NAME_scale.npy in the same directory as the image IMAGE_NAME.npy
     :param path: Path to original images
+    :param size: size of image to make
     :return: None
     """
 
@@ -96,10 +101,8 @@ def downsample_images(path, size=512):
         rescale_path = './data/rescaled_256_' + set_type + '/' + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
 
         # Save image and scaling to numpy file
-        with open(rescale_path + '.npy', 'wb') as handler:
-            np.save(handler, resized_image)
-        with open(rescale_path + '_scale.npy', 'wb') as handler:
-            np.save(handler, scaling)
+        np.save(rescale_path + '.npy', resized_image)
+        np.save(rescale_path + '.npy', scaling)
         print('Saving rescaled image ' + image_id + ' from study ' + study_id)
 
     print('Done!')
@@ -190,10 +193,18 @@ def load_sfrc_data(path):
     :return: images, class_labels, bboxes
     """
 
+    # Load raw data
     bboxes, class_labels, example_ids = load_labels(path)
 
     scales = load_scaling(path, example_ids)
 
     images = load_images(path, example_ids)
+
+    # Process bounding boxes
+    print('\nProcessing bounding boxes')
+    image_size = images.size()[2]
+    exchange_scale = torch.index_select(scales, 1, torch.LongTensor([1,0]))
+    bboxes[:, :, 1:5] = bboxes[:, :, 1:5] / exchange_scale.unsqueeze(dim=1).repeat(1,1,2) / image_size  # Normalize bounding box coordinates
+    bboxes[:, :, 3:5] = bboxes[:, :, 3:5] - bboxes[:, :, 1:3]  # Get width and height instead of x_max and y_max
 
     return images, class_labels, bboxes, scales

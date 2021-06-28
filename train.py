@@ -4,12 +4,11 @@ Training script for the SFRC19 detection SSD model
 import torch
 
 import data_processing as dp
-import sfrc19_ssmd_model as ssm
 
 
 def adjust_anchors(bbox_preds, anchors_orig):
     """
-    Adjusts the anchor boxes using the SSMD network predictions
+    Adjusts the anchor boxes using the SSMD network predictions and reshapes for compatibility with bbox labels
     :param bbox_preds: Predicted bounding box locations -- has size (batch_size, # anchors/pixel * 4, image size, image_size)
     :param anchors_orig: Prior anchor boxes to adjust -- has size ( # anchors/pixel, 4, image size, image_size)
     :return: adjusted_anchors
@@ -42,6 +41,8 @@ def adjust_anchors(bbox_preds, anchors_orig):
 
         adjusted_anchors.append(torch.cat((x_preds, y_preds, width_preds, height_preds), dim=2))
 
+        adjusted_anchors[i] = adjusted_anchors[i].unsqueeze(1).repeat(1, 8, 1, 1, 1, 1)
+
     return adjusted_anchors
 
 
@@ -55,19 +56,38 @@ def calculate_iou(bboxes, adjusted_anchors):
     :return: iou_tensor: torch tensor with IoU values
     """
 
-    # Get boxes from bboxes in each example
-    mask = torch.sum((torch.tensor([0,0,0,0,0]) != bboxes), dim=1)
-    num_boxes = mask[:, 0].unsqueeze(dim=1)
-    print(num_boxes)
+    # Loop through adjusted anchor box list
+    IoUs = []
+    for i in range(len(adjusted_anchors)):
+        # Get shape of bboxes compatible with adjusted anchors
+        feature_size = adjusted_anchors[i].size()[-1]
+        adjusted_bboxes = bboxes.unsqueeze(2).unsqueeze(4).unsqueeze(5).repeat(1,1,5,1,feature_size,feature_size)
 
+        # Define box and anchor parameters
+        x_min = adjusted_anchors[i][:, :, :, 0, :, :]
+        y_min = adjusted_anchors[i][:, :, :, 1, :, :]
+        width = adjusted_anchors[i][:, :, :, 2, :, :]
+        height = adjusted_anchors[i][:, :, :, 3, :, :]
 
-    # Calculate intersection
-    intersection = []
+        x_min_box = adjusted_bboxes[:, :, :, 1, :, :]
+        y_min_box = adjusted_bboxes[:, :, :, 2, :, :]
+        width_box = adjusted_bboxes[:, :, :, 3, :, :]
+        height_box = adjusted_bboxes[:, :, :, 4, :, :]
 
+        # Calculate intersection
+        x_int = torch.max(x_min, x_min_box) - torch.min(x_min + width, x_min_box + width_box)
+        y_int = torch.max(y_min, y_min_box) - torch.min(y_min + height, y_min_box + height_box)
+        intersection = x_int * y_int
 
-    # Calculate Union
+        # Calculate Union
+        anchor_area = width * height
+        box_area = width_box * height_box
+        union = (anchor_area + box_area) - intersection
 
-    return intersection
+        # Calculate IoU
+        IoUs.append(intersection/union)
+
+    return IoUs
 
 
 def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, epochs, batch_size):

@@ -47,70 +47,93 @@ def adjust_anchors(bbox_preds, anchors_orig):
     return adjusted_anchors
 
 
-def calculate_iou(bboxes, adjusted_anchors):
+def calculate_iou(bbox_labels, adjusted_anchors):
     """
     Calculates the Intersection over Union score to select the best boxes
-    :param bboxes: Ground truth bounding box scores
+    :param bbox_labels: Ground truth bounding box scores
     -- has size (batch_size, max_boxes, 5 [class_label, x, y, width, height])
     :param adjusted_anchors: Anchors boxes adjusted by the network predictions
     -- has size (batch_size, # anchors per pixel, 4, feature_size, feature_size
-    :return: iou_tensor: torch tensor with IoU values
+    :return: iou: torch tensor with IoU values
     """
 
-    # Loop through adjusted anchor box list
-    IoUs = []
+    # Get shape of bboxes compatible with adjusted anchors
+    feature_size = adjusted_anchors.size()[-1]
+    anchors_per_pixel = adjusted_anchors.size()[2]
+    adjusted_bboxes = bbox_labels.unsqueeze(2).unsqueeze(4).unsqueeze(5).repeat(1, 1, anchors_per_pixel
+                                                                                , 1, feature_size, feature_size)
+
+    # Define box and anchor parameters
+    x_min = adjusted_anchors[:, :, :, 0, :, :]
+    y_min = adjusted_anchors[:, :, :, 1, :, :]
+    width = adjusted_anchors[:, :, :, 2, :, :]
+    height = adjusted_anchors[:, :, :, 3, :, :]
+
+    x_min_box = adjusted_bboxes[:, :, :, 1, :, :]
+    y_min_box = adjusted_bboxes[:, :, :, 2, :, :]
+    width_box = adjusted_bboxes[:, :, :, 3, :, :]
+    height_box = adjusted_bboxes[:, :, :, 4, :, :]
+
+    x_left = torch.max(x_min, x_min_box)
+    y_top = torch.max(y_min, y_min_box)
+    x_right = torch.min(x_min + width, x_min_box + width_box)
+    y_bottom = torch.min(y_min + height, y_min_box + height_box)
+
+    # Check if boxes overlap
+    bool_tensor = torch.logical_or(x_right <= x_left, y_bottom <= y_top)  # Warnings aren't valid
+
+    # Calculate intersection
+    intersection = (x_right - x_left) * (y_bottom - y_top)
+    intersection[bool_tensor] = 0.0  # If boxes don't overlap intersection is 0
+
+    # Calculate Union
+    anchor_area = width * height
+    box_area = width_box * height_box
+    union = (anchor_area + box_area) - intersection
+
+    # Calculate IoU
+    iou = intersection/union
+
+    return iou, adjusted_bboxes
+
+
+def get_positive_anchors(bbox_labels, adjusted_anchors):
+    """
+    Labels the anchor boxes with IoUs over a threshold of 0.5 as positive (1) and under a threshold of 0.5 as
+    negative (0)
+    :param bbox_labels: List of ground truth bounding box tensors
+    :param adjusted_anchors: list of default anchor box tensors
+    :return: anchor_status
+    """
+    threshold = 0.5
+    anchor_status = []
+    iou_list = []
+    adjusted_bboxes = []
     for i in range(len(adjusted_anchors)):
-        # Get shape of bboxes compatible with adjusted anchors
-        feature_size = adjusted_anchors[i].size()[-1]
-        anchors_per_pixel = adjusted_anchors[i].size()[2]
-        adjusted_bboxes = bboxes.unsqueeze(2).unsqueeze(4).unsqueeze(5).repeat(1,1,anchors_per_pixel
-                                                                               ,1,feature_size,feature_size)
+        # Reshape for convenience
+        anchors_tmp = adjusted_anchors[i]
 
-        # Define box and anchor parameters
-        x_min = adjusted_anchors[i][:, :, :, 0, :, :]
-        y_min = adjusted_anchors[i][:, :, :, 1, :, :]
-        width = adjusted_anchors[i][:, :, :, 2, :, :]
-        height = adjusted_anchors[i][:, :, :, 3, :, :]
+        iou, new_bboxes = calculate_iou(bbox_labels, anchors_tmp)
+        iou_list.append(iou)
 
-        x_min_box = adjusted_bboxes[:, :, :, 1, :, :]
-        y_min_box = adjusted_bboxes[:, :, :, 2, :, :]
-        width_box = adjusted_bboxes[:, :, :, 3, :, :]
-        height_box = adjusted_bboxes[:, :, :, 4, :, :]
+        # Format iou to match bbox_labels and adjusted_anchors
+        iou = iou.unsqueeze(3).repeat(1,1,1,4,1,1)
+        anchor_status.append(iou > threshold)
+        adjusted_bboxes.append(new_bboxes)
 
-        x_left = torch.max(x_min, x_min_box)
-        y_top = torch.max(y_min, y_min_box)
-        x_right = torch.min(x_min + width, x_min_box + width_box)
-        y_bottom = torch.min(y_min + height, y_min_box + height_box)
-
-        # Check if boxes overlap
-        bool_tensor = torch.logical_or(x_right <= x_left, y_bottom <= y_top)  # Warnings aren't valid
-
-        # Calculate intersection
-        intersection = (x_right - x_left) * (y_bottom - y_top)
-        intersection[bool_tensor] = 0.0  # If boxes don't overlap intersection is 0
-
-        # Calculate Union
-        anchor_area = width * height
-        box_area = width_box * height_box
-        union = (anchor_area + box_area) - intersection
-
-        # Calculate IoU
-        iou = intersection/union
-        IoUs.append(iou)
-
-    return IoUs
+    return anchor_status, adjusted_bboxes
 
 
-def non_maximal_suppression(adjusted_anchors, IoUs):
-    """
-    Uses non-maximal suppression to select which adjusted anchor to use from the adjusted_anchors tensor
-    :param adjusted_anchors: list of torch tensors of adjusted anchor box values
-    :param IoUs: list of torch tensors with Intersection over Union values
-    :return: selected_anchors
-    """
+# def non_maximal_suppression(adjusted_anchors, IoUs):
+#     """
+#     Uses non-maximal suppression to select which adjusted anchor to use from the adjusted_anchors tensor
+#     :param adjusted_anchors: list of torch tensors of adjusted anchor box values
+#     :param IoUs: list of torch tensors with Intersection over Union values
+#     :return: selected_anchors
+#     """
 
 
-def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, epochs, batch_size):
+def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, scales, epochs, batch_size):
     """
     Training function for the SSMD model to predict opacity and bounding boxes
     :param model: SSMD model to train
@@ -119,10 +142,12 @@ def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, epochs, ba
     :param optimizer: Optimizing algorithm to use
     :param X: Input images for training
     :param Y: Bounding box and opacity labels
+    :param scales: Scaling factors used during downsampling of images
     :param epochs: Number of epochs to train for
     :param batch_size: Batch size used in training
     :return: predictions
     """
+    [bbox_labels, opacity] = Y
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -139,8 +164,11 @@ def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, epochs, ba
             # Pass data through network
             conf_scores, bbox_preds, anchors = model(X)
 
-            # Calculate IoU between bbox_preds and actual boxes
+            # Adjust anchors with bbox_preds and determine positive boxes
+            adjusted_anchors = adjust_anchors(bbox_preds, anchors)
+            anchor_status, adjusted_bboxes = get_positive_anchors(bbox_labels, adjusted_anchors)
 
+            #
 
 
 if __name__ == '__main__':

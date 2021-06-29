@@ -161,9 +161,6 @@ def load_scaling(path, example_ids):
         study_id = example_ids['StudyInstanceUID'][image_num]
         image_id = example_ids['id'][image_num]
         scale_path = glob.glob(path + '/rescaled_train/' + study_id + '/*/' + image_id + '_scale.npy')
-        print(study_id)
-        print(image_id)
-        print(scale_path)
         scales = torch.from_numpy(np.load(scale_path[0]))
         scaling_tensor[image_num,:] = scales
         it += 1

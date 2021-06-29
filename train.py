@@ -164,11 +164,16 @@ def train_ssmd(model, bbox_criterion, cls_criterion, optimizer, X, Y, scales, ep
             # Pass data through network
             conf_scores, bbox_preds, anchors = model(X)
 
-            # Adjust anchors with bbox_preds and determine positive boxes
+            # Adjust anchors with bbox_preds and determine positive and negative boxes/anchors
             adjusted_anchors = adjust_anchors(bbox_preds, anchors)
             anchor_status, adjusted_bboxes = get_positive_anchors(bbox_labels, adjusted_anchors)
+            bbox_coords = adjusted_bboxes[:,:,:,1:-1,:,:]
+            positive_anchors = []
+            positive_bboxes = []
+            for j in range(len(adjusted_anchors)):
+                positive_anchors.append(adjusted_anchors[j][anchor_status[j]])
+                positive_bboxes.append(bbox_coords[j][anchor_status[j]])
 
-            #
 
 
 if __name__ == '__main__':

@@ -1,11 +1,10 @@
-import os
 import glob
-import torch
-import pydicom
+import os
 
 import numpy as np
 import pandas as pd
-
+import pydicom
+import torch
 from skimage.transform import resize
 from tqdm import tqdm
 
@@ -42,9 +41,9 @@ def load_labels(path):
                 opacity = 1.0
             x_min = labels_list[5 * box + 1]
             y_min = labels_list[5 * box + 2]
-            x_max = labels_list[5 * box + 3]
-            y_max = labels_list[5 * box + 4]
-            bbox_coords = torch.tensor([opacity, x_min, y_min, x_max, y_max])
+            width = labels_list[5 * box + 3] - labels_list[5 * box + 1]
+            height = labels_list[5 * box + 4] - labels_list[5 * box + 2]
+            bbox_coords = torch.tensor([opacity, x_min, y_min, width, height])
             bbox_labels[image, box, :] = bbox_coords
 
     # Process study level label data into pytorch tensor format for training
@@ -205,6 +204,5 @@ def load_sfrc_data(path):
     image_size = images.size()[2]
     exchange_scale = torch.index_select(scales, 1, torch.LongTensor([1,0]))
     bboxes[:, :, 1:5] = bboxes[:, :, 1:5] / exchange_scale.unsqueeze(dim=1).repeat(1,1,2) / image_size  # Normalize bounding box coordinates
-    bboxes[:, :, 3:5] = bboxes[:, :, 3:5] - bboxes[:, :, 1:3]  # Get width and height instead of x_max and y_max
 
     return images, class_labels, bboxes, scales

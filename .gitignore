@@ -1,0 +1,4 @@
+/data/rescaled_train/
+/data/sample_submission.csv
+/data/train_image_level.csv
+/data/train_study_level.csv

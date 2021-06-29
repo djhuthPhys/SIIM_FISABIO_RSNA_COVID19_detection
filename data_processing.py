@@ -95,13 +95,13 @@ def downsample_images(path, size=512):
         # Path formatting and directory creation
         sub_directory_names = image_path.split('./data/' + set_type)[1].split('\\')[0:2]
         sub_directory = sub_directory_names[0] + '/' + sub_directory_names[1]
-        if not os.path.exists('./data/rescaled_256_' + set_type + sub_directory):
-            os.makedirs('./data/rescaled_256_' + set_type + sub_directory)
-        rescale_path = './data/rescaled_256_' + set_type + '/' + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
+        if not os.path.exists('./data/rescaled_' + set_type + sub_directory):
+            os.makedirs('./data/rescaled_' + set_type + sub_directory)
+        rescale_path = './data/rescaled_' + set_type + '/' + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
 
         # Save image and scaling to numpy file
         np.save(rescale_path + '.npy', resized_image)
-        np.save(rescale_path + '.npy', scaling)
+        np.save(rescale_path + '_scale.npy', scaling)
         print('Saving rescaled image ' + image_id + ' from study ' + study_id)
 
     print('Done!')
@@ -161,6 +161,9 @@ def load_scaling(path, example_ids):
         study_id = example_ids['StudyInstanceUID'][image_num]
         image_id = example_ids['id'][image_num]
         scale_path = glob.glob(path + '/rescaled_train/' + study_id + '/*/' + image_id + '_scale.npy')
+        print(study_id)
+        print(image_id)
+        print(scale_path)
         scales = torch.from_numpy(np.load(scale_path[0]))
         scaling_tensor[image_num,:] = scales
         it += 1

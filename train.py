@@ -243,7 +243,7 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
 
 if __name__ == '__main__':
     # Load data
-    images, class_labels, bboxes, image_scales = dp.load_sfrc_data('/data')
+    images, class_labels, bboxes, image_scales = dp.load_sfrc_data('./data')
 
     # Define model
     base_channels = (1,16,32)

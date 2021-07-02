@@ -8,13 +8,15 @@ import data_processing as dp
 import sfrc19_ssmd_model as ssm
 
 
-# Train on GPU if available
-if torch.cuda.is_available():
-    device = torch.device('cuda:0')
-    print('\nTraining on GPU')
-else:
-    device = torch.device('cpu')
-    print('\nTraining on CPU')
+# # Train on GPU if available
+# if torch.cuda.is_available():
+#     device = torch.device('cuda:0')
+#     print('\nTraining on GPU')
+# else:
+#     device = torch.device('cpu')
+#     print('\nTraining on CPU')
+
+device = torch.device('cpu')
 
 
 def adjust_anchors(bbox_preds, anchors_orig):
@@ -200,7 +202,7 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
 
             # Define batch
             indices = permutation[i:i+batch_size]
-            X_batch, Y_batch = X[indices, :, :, :], Y[indices, :, :, :]
+            X_batch, Y_batch = X[indices, :, :, :].to(device), Y[indices, :, :].to(device)
 
             # Pass data through network
             conf_scores, bbox_preds, anchors = model(X_batch)
@@ -253,11 +255,12 @@ if __name__ == '__main__':
     scales = (0.75, 0.5, 0.25, 0.1)
     ratios = (1.0, 2.0, 0.5)
     num_classes = 1
-    network = ssm.full_SSD(base_channels, base_depths, scale_channels, scale_depths, scales, ratios, num_classes)
+    network = ssm.full_SSD(base_channels, base_depths, scale_channels,
+                           scale_depths, scales, ratios, num_classes).to(device)
 
     loc_criterion = nn.SmoothL1Loss()
     cls_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(lr=0.001, params=network.parameters())
 
     # Train model
-    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, 1, 16)
+    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, 1, 4)

@@ -349,16 +349,17 @@ class full_SSD(nn.Module):
         self.detectors = nn.ModuleList([detection_head(self.output_channels[i], self.num_anchors, self.num_classes)
                                         for i in range(len(self.output_channels))])
 
+
     def forward(self, x):
         # Pass through base model and generate anchor boxes
         x = self.features(x)
         anchors = generate_anchors(x, self.scales, self.ratios)
 
         # Loop through detector heads to get class and bbox predictions
-        base_classes, base_bboxes = detection_head(x[0].size()[1], self.num_anchors, self.num_classes)(x[0])
+        base_classes, base_bboxes = self.detectors[0](x[0])
         conf_scores, bbox_preds = [base_classes], [base_bboxes]
         for i in range(len(x[1])):
-            classes_tmp, bboxes_tmp = detection_head(x[1][i].size()[1], self.num_anchors, self.num_classes)(x[1][i])
+            classes_tmp, bboxes_tmp = self.detectors[i+1](x[1][i])
             conf_scores.append(classes_tmp)
             bbox_preds.append(bboxes_tmp)
 

@@ -2,11 +2,10 @@
 Training script for the SFRC19 detection SSD model
 """
 import torch
-
 import torch.nn as nn
+
 import data_processing as dp
 import sfrc19_ssmd_model as ssm
-
 
 # # Train on GPU if available
 # if torch.cuda.is_available():
@@ -67,33 +66,29 @@ def process_anchors(bbox_labels, anchors_orig):
     :param bbox_labels: Ground truth bounding box scores
     -- has size (batch_size, max_boxes, 5 [class_label, x, y, width, height])
     :param anchors_orig: Anchors boxes adjusted by the network predictions
-    -- has size (batch_size, max boxes, # anchors per pixel, 4, feature_size, feature_size)
+    -- has size (batch_size, # anchors per pixel, 4, feature_size, feature_size)
     :return: iou: torch tensor with IoU values
+             offsets: torch tensor with bbox prediction offsets
+             real_bboxes: tensor of bboxes that actually show up in the images
     """
 
+    # Get labeled bboxes from bbox_labels into tensor of shape (# bboxes, 4 [x, y, width, height])
+    bool_tensor = (torch.tensor([0]) != torch.sum(bbox_labels, dim=2))
+    real_bboxes = bbox_labels[0][bool_tensor[0]]
+    for i in range(bbox_labels.size()[0]-1):
+        real_bboxes = torch.cat((real_bboxes, bbox_labels[i+1][bool_tensor[i+1]]))
+
     # Get shape of bboxes compatible with adjusted anchors
-    feature_size = anchors_orig.size()[-1]
-    anchors_per_pixel = anchors_orig.size()[0]
-    anchors_tmp = anchors_orig.unsqueeze(dim=0).repeat(bbox_labels.size()[0], 1, 1, 1, 1).unsqueeze(1).repeat(1, 8, 1,
-                                                                                                              1, 1, 1)
-    adjusted_bboxes = bbox_labels.unsqueeze(2).unsqueeze(4).unsqueeze(5).repeat(1, 1, anchors_per_pixel,
-                                                                                1, feature_size, feature_size)
+    anchors_orig = torch.transpose(anchors_orig,0,1).unsqueeze(0)
+    real_bboxes = real_bboxes.unsqueeze(2).unsqueeze(2).unsqueeze(2)
 
-    # Define box and anchor parameters
-    x_min = anchors_tmp[:, :, :, 0, :, :]
-    y_min = anchors_tmp[:, :, :, 1, :, :]
-    width = anchors_tmp[:, :, :, 2, :, :]
-    height = anchors_tmp[:, :, :, 3, :, :]
-
-    x_min_box = adjusted_bboxes[:, :, :, 1, :, :]
-    y_min_box = adjusted_bboxes[:, :, :, 2, :, :]
-    width_box = adjusted_bboxes[:, :, :, 3, :, :]
-    height_box = adjusted_bboxes[:, :, :, 4, :, :]
-
-    x_left = torch.max(x_min, x_min_box)
-    y_top = torch.max(y_min, y_min_box)
-    x_right = torch.min(x_min + width, x_min_box + width_box)
-    y_bottom = torch.min(y_min + height, y_min_box + height_box)
+    # # Define box and anchor parameters
+    x_left = torch.max(anchors_orig[:,0,:,:,:], real_bboxes[:,1,:,:,:])
+    y_top = torch.max(anchors_orig[:,1,:,:,:], real_bboxes[:,2,:,:,:])
+    x_right = torch.min(anchors_orig[:,0,:,:,:] + anchors_orig[:,2,:,:,:],
+                        real_bboxes[:,1,:,:,:] + real_bboxes[:,3,:,:,:])
+    y_bottom = torch.min(anchors_orig[:,1,:,:,:] + anchors_orig[:,3,:,:,:],
+                         real_bboxes[:,2,:,:,:] + real_bboxes[:,4,:,:,:])
 
     # Check if boxes overlap
     bool_tensor = torch.logical_or(x_right <= x_left, y_bottom <= y_top)
@@ -103,22 +98,21 @@ def process_anchors(bbox_labels, anchors_orig):
     intersection[bool_tensor] = 0.0  # If boxes don't overlap intersection is 0
 
     # Calculate Union
-    anchor_area = width * height
-    box_area = width_box * height_box
+    anchor_area = anchors_orig[:,2,:,:,:] * anchors_orig[:,3,:,:,:]
+    box_area = real_bboxes[:,3,:,:,:] * real_bboxes[:,4,:,:,:]
     union = (anchor_area + box_area) - intersection
 
     # Calculate IoU
     iou = intersection/union
 
     # Calculate anchor box offsets
-    x_min_off = (x_min - x_min_box).unsqueeze(dim=3)
-    y_min_off = (y_min - y_min_box).unsqueeze(dim=3)
-    width_off = (width - width_box).unsqueeze(dim=3)
-    height_off = (height - height_box).unsqueeze(dim=3)
-    offsets = torch.cat((x_min_off, y_min_off, width_off, height_off), dim=3)
+    x_min_off = (anchors_orig[:,0,:,:,:] - real_bboxes[:,1,:,:,:]).unsqueeze(dim=1)
+    y_min_off = (anchors_orig[:,1,:,:,:] - real_bboxes[:,2,:,:,:]).unsqueeze(dim=1)
+    width_off = (anchors_orig[:,2,:,:,:] - real_bboxes[:,3,:,:,:]).unsqueeze(dim=1)
+    height_off = (anchors_orig[:,3,:,:,:] - real_bboxes[:,4,:,:,:]).unsqueeze(dim=1)
+    offsets = torch.cat((x_min_off, y_min_off, width_off, height_off), dim=1)
 
-
-    return iou, offsets, adjusted_bboxes
+    return iou, offsets, real_bboxes
 
 
 def get_positive_anchors(bbox_labels, anchors_orig):
@@ -127,24 +121,23 @@ def get_positive_anchors(bbox_labels, anchors_orig):
     negative (0), returns the anchor box offsets needed to match bounding box labels
     :param bbox_labels: List of ground truth bounding box tensors
     :param anchors_orig: list of default anchor box tensors
-    :return: anchor_status, anchor_offsets, adjusted_bboxes, iou_list
+    :return: anchor_status, anchor_offsets, real_bbox_list, iou_list
     """
     threshold = 0.5
     iou_list = []
     anchor_status = []
     anchor_offsets = []
-    adjusted_bboxes = []
+    real_bbox_list = []
     for i in range(len(anchors_orig)):
-        iou, offsets, new_bboxes = process_anchors(bbox_labels, anchors_orig[i])
+        iou, offsets, real_bboxes = process_anchors(bbox_labels, anchors_orig[i])
         iou_list.append(iou)
 
         # Format iou to match bbox_labels and adjusted_anchors
-        iou = iou.unsqueeze(3).repeat(1,1,1,4,1,1)
         anchor_status.append(iou > threshold)
-        adjusted_bboxes.append(new_bboxes)
+        real_bbox_list.append(real_bboxes)
         anchor_offsets.append(offsets)
 
-    return anchor_status, anchor_offsets, adjusted_bboxes, iou_list
+    return anchor_status, anchor_offsets, real_bbox_list, iou_list
 
 
 def process_confs(conf_scores, iou_list, batch_size, max_boxes):
@@ -213,7 +206,7 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
                 anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
                 feature_size = bbox_preds[k].size()[-1]
                 shaped_bbox_preds.append(bbox_preds[k].reshape((batch_size, anchors_per_pixel, 4, feature_size,
-                                                                feature_size)).unsqueeze(1).repeat(1,8,1,1,1,1))
+                                                                feature_size)))
 
             # Determine positive and negative boxes/anchors and calculate anchor offsets
             # Get positive offsets and bbox predictions for loss calculation
@@ -240,7 +233,6 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             num_batches += 1
             if (i/batch_size) % 20 == 19:
                 print('Epoch %i, batch %i: training loss = %.8f' % (epoch, i, running_loss/num_batches))
-
 
 
 if __name__ == '__main__':

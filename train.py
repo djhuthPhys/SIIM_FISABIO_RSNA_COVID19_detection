@@ -282,10 +282,10 @@ if __name__ == '__main__':
     images, class_labels, bboxes, image_scales = dp.load_sfrc_data('./data')
 
     # Define model
-    base_channels = (1,64,64,64)
-    base_depths = (1,1,1)
-    scale_channels = (1,1,1)
-    scale_depths = (64,64,64)
+    base_channels = (1,32,32,32)
+    base_depths = (1,1,1,1)
+    scale_channels = (32,32,32)
+    scale_depths = (1,1,1)
     scales = (0.75, 0.5, 0.25, 0.1)
     ratios = (1.0, 2.0, 0.5)
     num_classes = 1
@@ -297,6 +297,6 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(lr=0.001, params=network.parameters())
 
     # Train model
-    batch = 32
-    num_epochs = 3
-    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, num_epochs, batch)
+    batch_size = 64
+    num_epochs = 10
+    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, num_epochs, batch_size)

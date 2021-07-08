@@ -7,15 +7,14 @@ import torch.nn as nn
 import data_processing as dp
 import sfrc19_ssmd_model as ssm
 
-# # Train on GPU if available
-# if torch.cuda.is_available():
-#     device = torch.device('cuda:0')
-#     print('\nTraining on GPU')
-# else:
-#     device = torch.device('cpu')
-#     print('\nTraining on CPU')
+# Train on GPU if available
+if torch.cuda.is_available():
+    device = torch.device('cuda:0')
+    print('\nTraining on GPU')
+else:
+    device = torch.device('cpu')
+    print('\nTraining on CPU')
 
-device = torch.device('cpu')
 
 
 def adjust_anchors(bbox_preds, anchors_orig):
@@ -73,7 +72,7 @@ def process_anchors(bbox_labels, anchors_orig):
     """
 
     # Get labeled bboxes from bbox_labels into tensor of shape (# bboxes, 4 [x, y, width, height])
-    bool_tensor = (torch.tensor([0]) != torch.sum(bbox_labels, dim=2))
+    bool_tensor = (torch.tensor([0]).to(device) != torch.sum(bbox_labels, dim=2))
     real_bboxes = bbox_labels[0][bool_tensor[0]]
     for i in range(bbox_labels.size()[0]-1):
         real_bboxes = torch.cat((real_bboxes, bbox_labels[i+1][bool_tensor[i+1]]))
@@ -137,7 +136,7 @@ def get_positive_anchors(bbox_labels, anchors_orig):
         real_bbox_list.append(real_bboxes)
         anchor_offsets.append(offsets)
 
-    return anchor_status, anchor_offsets, real_bbox_list, iou_list
+    return anchor_status, anchor_offsets
 
 
 def process_confs(conf_scores, anchors, bbox_labels, batch_size, max_boxes):
@@ -162,14 +161,11 @@ def process_confs(conf_scores, anchors, bbox_labels, batch_size, max_boxes):
                                             feature_size)
         shaped_scores.append(scores_tmp)
 
-        # Get IoU values in the shape (batch_size, max_boxes, num_classes + 1, # anchors per pixel, feature size, feature_size)
-        iou = exhaustive_iou(anchors[i], bbox_labels, max_boxes)
+        # Get IoU threshold values in the shape (batch_size, max_boxes, num_classes + 1, # anchors per pixel, feature size, feature_size)
+        _, status = exhaustive_iou(anchors[i], bbox_labels, max_boxes)
 
-        # Generate class labels based on IoU score
-        iou = iou.unsqueeze(2)
-        pos_bools = torch.sum(iou > 0.5, dim=1)
-        neg_bools = torch.logical_not(torch.lt(torch.sum(iou <= 0.5, dim=1), max_boxes))
-        cls_labels.append(torch.cat((pos_bools, neg_bools), dim=1).long())
+        # Generate class labels list based on IoU score
+        cls_labels.append(torch.sum(status, dim=1).long())
 
     return shaped_scores, cls_labels
 
@@ -211,8 +207,9 @@ def exhaustive_iou(anchors, bbox_labels, max_boxes):
 
     # Calculate IoU
     iou = intersection/union
+    status = torch.gt(iou, 0.5)
 
-    return iou
+    return iou, status
 
 
 def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epochs, batch_size):
@@ -235,7 +232,7 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
     for epoch in range(epochs):
         permutation = torch.randperm(X.size()[0])
 
-        for i in range(0, X.size()[0], batch_size):
+        for i in range(0, X.size()[0], batch_size)[0:-1]:
             # Zero out gradients
             optimization.zero_grad()
 
@@ -250,14 +247,16 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             for k in range(len(bbox_preds)):
                 anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
                 feature_size = bbox_preds[k].size()[-1]
-                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size, feature_size))
+                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size,
+                                                       feature_size)).unsqueeze(1).repeat(1,max_boxes,1,1,1,1)
 
             # Determine positive and negative boxes/anchors and calculate anchor offsets
             # Get positive offsets and bbox predictions for loss calculation
-            anchor_status, anchor_offsets, real_bboxes, iou_list = get_positive_anchors(y_batch, anchors)
+            anchor_status, anchor_offsets = get_positive_anchors(y_batch, anchors)
             for j in range(len(anchors)):
                 anchor_offsets[j] = anchor_offsets[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
-                bbox_preds[j] = bbox_preds[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
+                _, bbox_status = exhaustive_iou(anchors[j], y_batch, max_boxes)
+                bbox_preds[j] = bbox_preds[j][bbox_status.unsqueeze(2).repeat(1,1,4,1,1,1)]\
 
             # Process confidence scores to calculate losses
             conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, batch_size, max_boxes)
@@ -268,13 +267,14 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             for m in range(len(anchors)):
                 loc_loss += bbox_criterion(bbox_preds[m], anchor_offsets[m])
                 cls_loss += class_criterion(conf_scores[m], box_labels[m])
-            total_loss = loc_loss + cls_loss
-            running_loss += total_loss
-            print(total_loss)
+            loss = loc_loss + cls_loss
+            loss.backward()
+            optimizer.step()
 
+            running_loss += float(loss.item())
             num_batches += 1
             if (i/batch_size) % 20 == 19:
-                print('Epoch %i, batch %i: training loss = %.8f' % (epoch, i, running_loss/num_batches))
+                print('Epoch %i, batch %i: training loss = %.8f' % (epoch, i/batch_size + 1, running_loss/num_batches))
 
 
 if __name__ == '__main__':
@@ -282,10 +282,10 @@ if __name__ == '__main__':
     images, class_labels, bboxes, image_scales = dp.load_sfrc_data('./data')
 
     # Define model
-    base_channels = (1,16,32)
+    base_channels = (1,64,64,64)
     base_depths = (1,1,1)
-    scale_channels = (1,)
-    scale_depths = (1,)
+    scale_channels = (1,1,1)
+    scale_depths = (64,64,64)
     scales = (0.75, 0.5, 0.25, 0.1)
     ratios = (1.0, 2.0, 0.5)
     num_classes = 1
@@ -297,4 +297,6 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(lr=0.001, params=network.parameters())
 
     # Train model
-    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, 1, 4)
+    batch_size = 32
+    num_epochs = 3
+    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, num_epochs, batch_size)

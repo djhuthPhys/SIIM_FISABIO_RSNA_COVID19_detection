@@ -297,6 +297,6 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(lr=0.001, params=network.parameters())
 
     # Train model
-    batch_size = 32
+    batch = 32
     num_epochs = 3
-    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, num_epochs, batch_size)
+    train_ssmd(network, loc_criterion, cls_criterion, optimizer, images, bboxes, num_epochs, batch)

@@ -91,7 +91,7 @@ def process_anchors(bbox_labels, anchors_orig):
                          real_bboxes[:,2,:,:,:] + real_bboxes[:,4,:,:,:])
 
     # Check if boxes overlap
-    bool_tensor = torch.logical_or(x_right <= x_left, y_bottom <= y_top)
+    bool_tensor = torch.logical_or(torch.le(x_right, x_left), torch.le(y_bottom, y_top))
 
     # Calculate intersection
     intersection = (x_right - x_left) * (y_bottom - y_top)
@@ -140,33 +140,79 @@ def get_positive_anchors(bbox_labels, anchors_orig):
     return anchor_status, anchor_offsets, real_bbox_list, iou_list
 
 
-def process_confs(conf_scores, iou_list, batch_size, max_boxes):
+def process_confs(conf_scores, anchors, bbox_labels, batch_size, max_boxes):
     """
     Processes the class scores to
     :param conf_scores: List of confidence scores for classes
-    :param iou_list: List of anchor positivity statuses
+    :param anchors: List of anchor values
+    :param bbox_labels: bbox labels in batch
     :param batch_size: Batch size used in training
-    :param max_boxes: The maximum number of boxes in a single image in training set
+    :param max_boxes: The maximum number of boxes that appear in the data set for a single image
     :return: processed_scores
     """
 
-    anchors_per_pixel = int(conf_scores[0].size()[1]/num_classes)
+    anchors_per_pixel = int(conf_scores[0].size()[1]/2)
     shaped_scores = []
     cls_labels = []
     for i in range(len(conf_scores)):
         feature_size = conf_scores[i].size()[-1]
         # Reshape confidence scores to
-        # (batch_size, num_classes + 1, max_boxes, # anchors per pixel, feature_size, feature_size)
-        scores_tmp = conf_scores[i].reshape(batch_size, anchors_per_pixel, num_classes, feature_size,
-                                            feature_size).unsqueeze(1).repeat(1,max_boxes,1,1,1,1)
-        shaped_scores.append(torch.transpose(scores_tmp,1,3))
+        # (batch_size, num_classes + 1, # anchors per pixel, feature_size, feature_size)
+        scores_tmp = conf_scores[i].reshape(batch_size, 2, anchors_per_pixel, feature_size,
+                                            feature_size)
+        shaped_scores.append(scores_tmp)
+
+        # Get IoU values in the shape (batch_size, max_boxes, num_classes + 1, # anchors per pixel, feature size, feature_size)
+        iou = exhaustive_iou(anchors[i], bbox_labels, max_boxes)
 
         # Generate class labels based on IoU score
-        pos_bools = iou_list[i].unsqueeze(3) > 0.5
-        neg_bools = iou_list[i].unsqueeze(3) <= 0.5
-        cls_labels.append(torch.transpose(torch.cat((pos_bools, neg_bools), dim=3).long(),1,3))
+        iou = iou.unsqueeze(2)
+        pos_bools = torch.sum(iou > 0.5, dim=1)
+        neg_bools = torch.logical_not(torch.lt(torch.sum(iou <= 0.5, dim=1), max_boxes))
+        cls_labels.append(torch.cat((pos_bools, neg_bools), dim=1).long())
 
     return shaped_scores, cls_labels
+
+
+def exhaustive_iou(anchors, bbox_labels, max_boxes):
+    """
+    Calculates the IoU scores in the shape (batch_size, max_boxes, num_classes + 1, # anchors per pixel, feature size,
+    feature_size) for the confidence score labeling
+    :param anchors:
+    :param bbox_labels:
+    :param max_boxes
+    :return:
+    """
+
+    # Get shape of bboxes compatible with adjusted anchors
+    anchors = torch.transpose(anchors,0,1).unsqueeze(0).unsqueeze(0).repeat(1,max_boxes,1,1,1,1)
+    bbox_labels = bbox_labels.unsqueeze(3).unsqueeze(3).unsqueeze(3)
+
+    # Calculate IoU
+    # Define box and anchor parameters
+    x_left = torch.max(anchors[:,:,0,:,:,:], bbox_labels[:,:,1,:,:,:])
+    y_top = torch.max(anchors[:,:,1,:,:,:], bbox_labels[:,:,2,:,:,:])
+    x_right = torch.min(anchors[:,:,0,:,:,:] + anchors[:,:,2,:,:,:],
+                        bbox_labels[:,:,1,:,:,:] + bbox_labels[:,:,3,:,:,:])
+    y_bottom = torch.min(anchors[:,:,1,:,:,:] + anchors[:,:,3,:,:,:],
+                         bbox_labels[:,:,2,:,:,:] + bbox_labels[:,:,4,:,:,:])
+
+    # Check if boxes overlap
+    bool_tensor = torch.logical_or(torch.le(x_right, x_left), torch.le(y_bottom, y_top))
+
+    # Calculate intersection
+    intersection = (x_right - x_left) * (y_bottom - y_top)
+    intersection[bool_tensor] = 0.0  # If boxes don't overlap intersection is 0
+
+    # Calculate Union
+    anchor_area = anchors[:,:,2,:,:,:] * anchors[:,:,3,:,:,:]
+    box_area = bbox_labels[:,:,3,:,:,:] * bbox_labels[:,:,4,:,:,:]
+    union = (anchor_area + box_area) - intersection
+
+    # Calculate IoU
+    iou = intersection/union
+
+    return iou
 
 
 def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epochs, batch_size):
@@ -195,37 +241,33 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
 
             # Define batch
             indices = permutation[i:i+batch_size]
-            X_batch, Y_batch = X[indices, :, :, :].to(device), Y[indices, :, :].to(device)
+            x_batch, y_batch = X[indices, :, :, :].to(device), Y[indices, :, :].to(device)
 
             # Pass data through network
-            conf_scores, bbox_preds, anchors = model(X_batch)
+            conf_scores, bbox_preds, anchors = model(x_batch)
 
             # Reshape bbox_preds for localization loss calculation
-            shaped_bbox_preds = []
             for k in range(len(bbox_preds)):
                 anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
                 feature_size = bbox_preds[k].size()[-1]
-                shaped_bbox_preds.append(bbox_preds[k].reshape((batch_size, anchors_per_pixel, 4, feature_size,
-                                                                feature_size)))
+                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size, feature_size))
 
             # Determine positive and negative boxes/anchors and calculate anchor offsets
             # Get positive offsets and bbox predictions for loss calculation
-            anchor_status, anchor_offsets, adjusted_bboxes, iou_list = get_positive_anchors(Y, anchors)
-            positive_offsets = []
-            positive_bbox_preds = []
+            anchor_status, anchor_offsets, real_bboxes, iou_list = get_positive_anchors(y_batch, anchors)
             for j in range(len(anchors)):
-                positive_offsets.append(anchor_offsets[j][anchor_status[j]])
-                positive_bbox_preds.append(shaped_bbox_preds[j][anchor_status[j]])
+                anchor_offsets[j] = anchor_offsets[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
+                bbox_preds[j] = bbox_preds[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
 
             # Process confidence scores to calculate losses
-            shaped_scores, box_labels = process_confs(conf_scores, iou_list, batch_size, max_boxes)
+            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, batch_size, max_boxes)
 
             # Calculate losses and update parameters
             loc_loss = 0.0
             cls_loss = 0.0
-            for l in range(len(anchors)):
-                loc_loss += bbox_criterion(positive_bbox_preds[l], positive_offsets[l])
-                cls_loss += class_criterion(shaped_scores[l], box_labels[l])
+            for m in range(len(anchors)):
+                loc_loss += bbox_criterion(bbox_preds[m], anchor_offsets[m])
+                cls_loss += class_criterion(conf_scores[m], box_labels[m])
             total_loss = loc_loss + cls_loss
             running_loss += total_loss
             print(total_loss)

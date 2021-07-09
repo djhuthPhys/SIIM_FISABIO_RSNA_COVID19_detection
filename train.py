@@ -16,7 +16,6 @@ else:
     print('\nTraining on CPU')
 
 
-
 def adjust_anchors(bbox_preds, anchors_orig):
     """
     Adjusts the anchor boxes using the SSMD network predictions and reshapes for compatibility with bbox labels.
@@ -212,6 +211,64 @@ def exhaustive_iou(anchors, bbox_labels, max_boxes):
     return iou, status
 
 
+def validate_ssmd(model, X_val, Y_val, batch_size, bbox_criterion, class_criterion):
+    """
+    Outputs the loss values from a validation data set separate from the training set
+    :param model:
+    :param X_val:
+    :param Y_val:
+    :param batch_size:
+    :param bbox_criterion:
+    :param class_criterion
+    :return: total_loss
+    """
+    num_batches = 0
+    total_loss = 0.0
+    max_boxes = Y_val.size()[1]
+    model.eval()
+    with torch.no_grad:
+        for i in range(0, X_val.size()[0], batch_size):
+            # Define batch
+            if (i+batch_size) > X_val.size()[0].item():
+                x_batch, y_batch = X_val[i:X_val.size()[0].item(), :, :, :].to(device), \
+                                   Y_val[i:X_val.size()[0].item(), :, :].to(device)
+            else:
+                x_batch, y_batch = X_val[i:i+batch_size, :, :, :].to(device), Y_val[i:i+batch_size, :, :].to(device)
+
+            # Pass data through network
+            conf_scores, bbox_preds, anchors = model(x_batch)
+
+            # Reshape bbox_preds for localization loss calculation
+            for k in range(len(bbox_preds)):
+                anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
+                feature_size = bbox_preds[k].size()[-1]
+                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size,
+                                                       feature_size)).unsqueeze(1).repeat(1,max_boxes,1,1,1,1)
+
+            # Determine positive and negative boxes/anchors and calculate anchor offsets
+            # Get positive offsets and bbox predictions for loss calculation
+            anchor_status, anchor_offsets = get_positive_anchors(y_batch, anchors)
+            for j in range(len(anchors)):
+                anchor_offsets[j] = anchor_offsets[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
+                _, bbox_status = exhaustive_iou(anchors[j], y_batch, max_boxes)
+                bbox_preds[j] = bbox_preds[j][bbox_status.unsqueeze(2).repeat(1,1,4,1,1,1)]\
+
+            # Process confidence scores to calculate losses
+            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, batch_size, max_boxes)
+
+            # Calculate losses and update parameters
+            loc_loss = 0.0
+            cls_loss = 0.0
+            for m in range(len(anchors)):
+                loc_loss += bbox_criterion(bbox_preds[m], anchor_offsets[m])
+                cls_loss += class_criterion(conf_scores[m], box_labels[m])
+            loss = loc_loss + cls_loss
+            num_batches += 1
+        total_loss += loss
+
+    return total_loss/num_batches
+
+
 def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epochs, batch_size):
     """
     Training function for the SSMD model to predict opacity and bounding boxes
@@ -229,16 +286,26 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
     running_loss = 0.0
     num_batches = 0
 
-    for epoch in range(epochs):
-        permutation = torch.randperm(X.size()[0])
+    # Define training and validation set (Currently a 70/30 split)
+    permutation = torch.randperm(X.size()[0])
+    train_idx = permutation[0:round(X.size()[0]*0.7)]
+    val_idx = permutation[round(X.size()[0]*0.7):-1]
+    x_train, y_train = X[train_idx, :, :, :], Y[train_idx, :, :, :]
+    x_val, y_val = X[val_idx, :, :, :], Y[val_idx, :, :, :]
 
-        for i in range(0, X.size()[0], batch_size)[0:-1]:
+    for epoch in range(epochs):
+        permutation = torch.randperm(x_train.size()[0])
+
+        for i in range(0, x_train.size()[0], batch_size):
             # Zero out gradients
             optimization.zero_grad()
 
             # Define batch
-            indices = permutation[i:i+batch_size]
-            x_batch, y_batch = X[indices, :, :, :].to(device), Y[indices, :, :].to(device)
+            if (i+batch_size) > x_train.size()[0].item():
+                indices = permutation[i:x_train.size()[0].item()]
+            else:
+                indices = permutation[i:i+batch_size]
+            x_batch, y_batch = x_train[indices, :, :, :].to(device), y_train[indices, :, :].to(device)
 
             # Pass data through network
             conf_scores, bbox_preds, anchors = model(x_batch)
@@ -274,7 +341,9 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             running_loss += float(loss.item())
             num_batches += 1
             if (i/batch_size) % 20 == 19:
-                print('Epoch %i, batch %i: training loss = %.8f' % (epoch, i/batch_size + 1, running_loss/num_batches))
+                val_loss = validate_ssmd(model, x_val, y_val, batch_size, bbox_criterion, class_criterion)
+                print('Epoch %i, batch %i: training loss = %.8f, validation loss = %.8f'
+                      % (epoch, i/batch_size + 1, running_loss/num_batches, val_loss))
 
 
 if __name__ == '__main__':

@@ -69,12 +69,19 @@ def downsample_images(path, size=512):
 
     _, _, example_ids = load_labels('./data')
 
+
     for image_num in range(len(example_ids)):
 
         study_id = example_ids['StudyInstanceUID'][image_num]
         image_id = example_ids['id'][image_num]
 
-        image_path = glob.glob(path + '/' + study_id + '/*/' + image_id + '.dcm')[0]
+        if 'train' in path:
+            image_path = glob.glob(path + '/' + study_id + '/*/' + image_id + '.dcm')[0]
+        elif 'test' in path:
+            image_path = glob.glob(path + '/*/*/*.dcm')[image_num]
+        else:
+            image_path = None
+        print(image_path)
         image_data = pydicom.dcmread(image_path).pixel_array
 
         # Resize image to size x size array and get scaling information
@@ -93,11 +100,17 @@ def downsample_images(path, size=512):
             set_type = 'bad_type'
 
         # Path formatting and directory creation
-        sub_directory_names = image_path.split('./data/' + set_type)[1].split('\\')[0:2]
-        sub_directory = sub_directory_names[0] + '/' + sub_directory_names[1]
+        if 'train' in path:
+            sub_directory_names = image_path.split('./data/' + set_type)[1].split('\\')[0:2]
+            sub_directory = sub_directory_names[0] + sub_directory_names[1]
+        else:
+            sub_directory_names = image_path.split('./data/' + set_type)[1].split('\\')[1:4]
+            sub_directory = sub_directory_names[0] + '/' +  sub_directory_names[1] + '/' + sub_directory_names[2]
+        print(sub_directory)
         if not os.path.exists('./data/rescaled_' + set_type + sub_directory):
             os.makedirs('./data/rescaled_' + set_type + sub_directory)
-        rescale_path = './data/rescaled_' + set_type + '/' + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
+        rescale_path = './data/rescaled_' + set_type  + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
+        print(rescale_path)
 
         # Save image and scaling to numpy file
         np.save(rescale_path + '.npy', resized_image)
@@ -183,6 +196,40 @@ def get_class_weights(study_labels):
 
     return class_weights
 
+
+def load_test_images(path):
+    """
+    Loads and returns test images and their corresponding study IDs
+    :param path: path to test image files
+    :return: test_images, study_ids
+    """
+    image_paths = glob.glob(path + '/rescaled_test/*/*/*.npy')
+
+    # Load images
+    it = 0
+    image_tensor = torch.empty((len(image_paths)//2, 1, 512, 512))
+    study_ids = []
+    image_ids = []
+    for image_num in tqdm(range(0,len(image_paths),2)):
+        image_path = glob.glob(path + '/rescaled_test/*/*/*.npy')[image_num]
+        print(image_path.split('\\'))
+        study_ids.append(image_path.split('\\')[1])
+        image_ids.append(image_path.split('\\')[3].split('.npy')[0])
+        image = torch.from_numpy(np.load(image_path))
+        image_size = image.size()[0]
+        image = torch.reshape(image, (1, 1, image_size, image_size))
+        image_tensor[it, :, :, :] = image
+        it += 1
+
+    # # Load scales
+    # scales =
+    # for scale_num in tqdm(range(1, len(image_paths),2)):
+    #     scale_path = glob.glob(path + '/rescaled_test/*/*/*.npy')[scale_num]
+    #
+    # print(str(it) + ' images of size '
+    #       + str(image_tensor.size()[2]) + 'X' + str(image_tensor.size()[3]) + ' pixels loaded')
+
+    return image_tensor
 
 def load_sfrc_data(path):
     """

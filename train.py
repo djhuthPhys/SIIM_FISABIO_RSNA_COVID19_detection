@@ -2,10 +2,11 @@
 Training script for the SFRC19 detection SSD model
 """
 import torch
-import torch.nn as nn
 
+import torch.nn as nn
 import data_processing as dp
 import sfrc19_ssmd_model as ssm
+
 
 # Train on GPU if available
 if torch.cuda.is_available():
@@ -224,16 +225,19 @@ def validate_ssmd(model, X_val, Y_val, batch_size, bbox_criterion, class_criteri
     """
     num_batches = 0
     total_loss = 0.0
-    max_boxes = Y_val.size()[1]
+    max_boxes = int(Y_val.size()[1])
     model.eval()
-    with torch.no_grad:
+
+    with torch.no_grad():
         for i in range(0, X_val.size()[0], batch_size):
             # Define batch
-            if (i+batch_size) > X_val.size()[0].item():
-                x_batch, y_batch = X_val[i:X_val.size()[0].item(), :, :, :].to(device), \
-                                   Y_val[i:X_val.size()[0].item(), :, :].to(device)
+            if (i+batch_size) > X_val.size()[0]:
+                x_batch, y_batch = X_val[i:X_val.size()[0], :, :, :].to(device), \
+                                   Y_val[i:X_val.size()[0], :, :].to(device)
+                this_batch = x_batch.size()[0]
             else:
                 x_batch, y_batch = X_val[i:i+batch_size, :, :, :].to(device), Y_val[i:i+batch_size, :, :].to(device)
+                this_batch = batch_size
 
             # Pass data through network
             conf_scores, bbox_preds, anchors = model(x_batch)
@@ -242,7 +246,7 @@ def validate_ssmd(model, X_val, Y_val, batch_size, bbox_criterion, class_criteri
             for k in range(len(bbox_preds)):
                 anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
                 feature_size = bbox_preds[k].size()[-1]
-                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size,
+                bbox_preds[k] = bbox_preds[k].reshape((this_batch, 4, anchors_per_pixel, feature_size,
                                                        feature_size)).unsqueeze(1).repeat(1,max_boxes,1,1,1,1)
 
             # Determine positive and negative boxes/anchors and calculate anchor offsets
@@ -254,7 +258,7 @@ def validate_ssmd(model, X_val, Y_val, batch_size, bbox_criterion, class_criteri
                 bbox_preds[j] = bbox_preds[j][bbox_status.unsqueeze(2).repeat(1,1,4,1,1,1)]\
 
             # Process confidence scores to calculate losses
-            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, batch_size, max_boxes)
+            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, this_batch, max_boxes)
 
             # Calculate losses and update parameters
             loc_loss = 0.0
@@ -264,7 +268,8 @@ def validate_ssmd(model, X_val, Y_val, batch_size, bbox_criterion, class_criteri
                 cls_loss += class_criterion(conf_scores[m], box_labels[m])
             loss = loc_loss + cls_loss
             num_batches += 1
-        total_loss += loss
+            total_loss += loss.item()
+    model.train()
 
     return total_loss/num_batches
 
@@ -282,16 +287,18 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
     :param batch_size: Batch size used in training
     :return: predictions
     """
-    max_boxes = Y.size()[1]
+    max_boxes = int(Y.size()[1])
     running_loss = 0.0
+    val_loss = 100
+    prev_val_loss = 100
     num_batches = 0
 
     # Define training and validation set (Currently a 70/30 split)
     permutation = torch.randperm(X.size()[0])
     train_idx = permutation[0:round(X.size()[0]*0.7)]
     val_idx = permutation[round(X.size()[0]*0.7):-1]
-    x_train, y_train = X[train_idx, :, :, :], Y[train_idx, :, :, :]
-    x_val, y_val = X[val_idx, :, :, :], Y[val_idx, :, :, :]
+    x_train, y_train = X[train_idx, :, :, :], Y[train_idx, :, :]
+    x_val, y_val = X[val_idx, :, :, :], Y[val_idx, :, :]
 
     for epoch in range(epochs):
         permutation = torch.randperm(x_train.size()[0])
@@ -301,10 +308,12 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             optimization.zero_grad()
 
             # Define batch
-            if (i+batch_size) > x_train.size()[0].item():
-                indices = permutation[i:x_train.size()[0].item()]
+            if (i+batch_size) > x_train.size()[0]:
+                indices = permutation[i:x_train.size()[0]]
+                this_batch = indices.size()[0]
             else:
                 indices = permutation[i:i+batch_size]
+                this_batch = batch_size
             x_batch, y_batch = x_train[indices, :, :, :].to(device), y_train[indices, :, :].to(device)
 
             # Pass data through network
@@ -314,7 +323,7 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             for k in range(len(bbox_preds)):
                 anchors_per_pixel = int(bbox_preds[k].size()[1]/4)
                 feature_size = bbox_preds[k].size()[-1]
-                bbox_preds[k] = bbox_preds[k].reshape((batch_size, 4, anchors_per_pixel, feature_size,
+                bbox_preds[k] = bbox_preds[k].reshape((this_batch, 4, anchors_per_pixel, feature_size,
                                                        feature_size)).unsqueeze(1).repeat(1,max_boxes,1,1,1,1)
 
             # Determine positive and negative boxes/anchors and calculate anchor offsets
@@ -323,10 +332,10 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
             for j in range(len(anchors)):
                 anchor_offsets[j] = anchor_offsets[j][anchor_status[j].unsqueeze(1).repeat(1,4,1,1,1)]
                 _, bbox_status = exhaustive_iou(anchors[j], y_batch, max_boxes)
-                bbox_preds[j] = bbox_preds[j][bbox_status.unsqueeze(2).repeat(1,1,4,1,1,1)]\
+                bbox_preds[j] = bbox_preds[j][bbox_status.unsqueeze(2).repeat(1,1,4,1,1,1)]
 
             # Process confidence scores to calculate losses
-            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, batch_size, max_boxes)
+            conf_scores, box_labels = process_confs(conf_scores, anchors, y_batch, this_batch, max_boxes)
 
             # Calculate losses and update parameters
             loc_loss = 0.0
@@ -344,16 +353,27 @@ def train_ssmd(model, bbox_criterion, class_criterion, optimization, X, Y, epoch
                 val_loss = validate_ssmd(model, x_val, y_val, batch_size, bbox_criterion, class_criterion)
                 print('Epoch %i, batch %i: training loss = %.8f, validation loss = %.8f'
                       % (epoch, i/batch_size + 1, running_loss/num_batches, val_loss))
+                running_loss = 0.0
+
+            # Save model if current validation loss is lower than previous value
+            if val_loss < prev_val_loss:
+                if save_model:
+                    torch.save(model.state_dict(), 'sfrc19_detector_model.pth')
+                    prev_val_loss = val_loss
+                    print('Model saved!')
 
 
 if __name__ == '__main__':
     # Load data
     images, class_labels, bboxes, image_scales = dp.load_sfrc_data('./data')
 
+    # Save model this run?
+    save_model = 1
+
     # Define model
     base_channels = (1,32,32,32)
     base_depths = (1,1,1,1)
-    scale_channels = (32,32,32)
+    scale_channels = (32,16,8)
     scale_depths = (1,1,1)
     scales = (0.75, 0.5, 0.25, 0.1)
     ratios = (1.0, 2.0, 0.5)

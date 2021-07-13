@@ -18,7 +18,7 @@ def load_labels(path):
     """
 
     # Read in label data
-    image_data= pd.read_csv(path + '/train_image_level.csv')
+    image_data = pd.read_csv(path + '/train_image_level.csv')
     study_data = pd.read_csv(path + '/train_study_level.csv')
 
     # Process IDs to return
@@ -69,7 +69,6 @@ def downsample_images(path, size=512):
 
     _, _, example_ids = load_labels('./data')
 
-
     for image_num in range(len(example_ids)):
 
         study_id = example_ids['StudyInstanceUID'][image_num]
@@ -105,11 +104,11 @@ def downsample_images(path, size=512):
             sub_directory = sub_directory_names[0] + sub_directory_names[1]
         else:
             sub_directory_names = image_path.split('./data/' + set_type)[1].split('\\')[1:4]
-            sub_directory = sub_directory_names[0] + '/' +  sub_directory_names[1] + '/' + sub_directory_names[2]
+            sub_directory = sub_directory_names[0] + '/' + sub_directory_names[1] + '/' + sub_directory_names[2]
         print(sub_directory)
         if not os.path.exists('./data/rescaled_' + set_type + sub_directory):
             os.makedirs('./data/rescaled_' + set_type + sub_directory)
-        rescale_path = './data/rescaled_' + set_type  + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
+        rescale_path = './data/rescaled_' + set_type + image_path.split('./data/' + set_type)[1].split('.dcm')[0]
         print(rescale_path)
 
         # Save image and scaling to numpy file
@@ -211,7 +210,7 @@ def load_test_images(path):
     study_ids = []
     image_ids = []
     for image_num in tqdm(range(0,len(image_paths),2)):
-        image_path = glob.glob(path + '/rescaled_test/*/*/*.npy')[image_num]
+        image_path = image_paths[image_num]
         print(image_path.split('\\'))
         study_ids.append(image_path.split('\\')[1])
         image_ids.append(image_path.split('\\')[3].split('.npy')[0])
@@ -229,7 +228,8 @@ def load_test_images(path):
     # print(str(it) + ' images of size '
     #       + str(image_tensor.size()[2]) + 'X' + str(image_tensor.size()[3]) + ' pixels loaded')
 
-    return image_tensor
+    return image_tensor, study_ids, image_ids  # , scale_tensor
+
 
 def load_sfrc_data(path):
     """
